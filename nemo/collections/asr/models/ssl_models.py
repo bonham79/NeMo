@@ -111,7 +111,10 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
 
         else:
             self.decoder_ssl = SpeechEncDecSelfSupervisedModel.from_config_dict(self._cfg.decoder)
+            print("loading loss")
             self.loss = SpeechEncDecSelfSupervisedModel.from_config_dict(self._cfg.loss)
+            if self.loss.quantized_targets:
+                self.loss.quantizer = SpeechEncDecSelfSupervisedModel.from_config_dict(self._cfg.quantizer)
 
         self.spec_augmentation = SpeechEncDecSelfSupervisedModel.from_config_dict(self._cfg.spec_augment)
 
@@ -190,7 +193,6 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
             collate_fn = dataset.collate_fn
         else:
             collate_fn = dataset.datasets[0].collate_fn
-
         return torch.utils.data.DataLoader(
             dataset=dataset,
             batch_size=config['batch_size'],
@@ -414,7 +416,6 @@ class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
             else:
                 loss_value = self.loss(spectrograms=spectrograms, spec_masks=spec_masks, decoder_outputs=outputs)
         else:
-
             loss_value = encoded.new_zeros(1)
             outputs = {}
             registry = self.get_module_registry(self.encoder)

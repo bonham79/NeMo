@@ -31,11 +31,13 @@ class GumbelVectorQuantizer(NeuralModule):
         self,
         dim,
         num_vars,
-        temp,
         groups,
         combine_groups,
         vq_dim,
         time_first,
+        quantizer_temp_start: float = 2,
+        quantizer_temp_min: float = 0.5,
+        quantizer_temp_decay: float = 0.999995,
         activation="gelu",
         weight_proj_depth=1,
         weight_proj_factor=1,
@@ -44,8 +46,10 @@ class GumbelVectorQuantizer(NeuralModule):
 
         Args:
             dim: input dimension (channels)
-            num_vars: number of quantized vectors per group
-            temp: temperature for training. this should be a tuple of 3 elements: (start, stop, decay factor)
+            codebook_size: number of quantized vectors per group
+            quantizer_temp_start: Starting temperature in quantizer.
+            quantizer_temp_min: Minimum temperature in quantizer.
+            quantizer_temp_decay: Decay rate of quantizer temperature per global step.
             groups: number of groups for vector quantization
             combine_groups: whether to use the vectors for all groups
             vq_dim: dimensionality of the resulting quantized vector
@@ -87,9 +91,7 @@ class GumbelVectorQuantizer(NeuralModule):
             nn.init.normal_(self.weight_proj.weight, mean=0, std=1)
             nn.init.zeros_(self.weight_proj.bias)
 
-        assert len(temp) == 3, "Quantize temperature should be a tuple of 3 elements: (start, stop, decay factor)"
-
-        self.max_temp, self.min_temp, self.temp_decay = temp
+        self.max_temp, self.min_temp, self.temp_decay = quantizer_temp_start, quantizer_temp_min, quantizer_temp_decay
         self.curr_temp = self.max_temp
         self.codebook_indices = None
 
@@ -198,3 +200,91 @@ class GumbelVectorQuantizer(NeuralModule):
             return x, quantize_prob_ppl, cur_codebook_temp, target_ids
         else:
             return x, quantize_prob_ppl, cur_codebook_temp
+
+class RandomQuantizer(NeuralModule):
+    def __init__(
+        self,
+        dim,
+        num_vars,
+        groups,
+        combine_groups,
+        vq_dim,
+        time_first,
+    ):
+
+        super().__init__()
+
+        self.groups = groups
+        self.combine_groups = combine_groups
+        self.input_dim = dim
+        self.num_vars = num_vars
+        self.time_first = time_first
+
+        assert vq_dim % groups == 0, f"dim {vq_dim} must be divisible by groups {groups} for concatenation"
+
+        var_dim = vq_dim // groups
+        num_groups = groups if not combine_groups else 1
+
+        self.vars = torch.zeros((num_groups * num_vars, var_dim), requires_grad=False, device='cuda:0')
+        nn.init.uniform_(self.vars)
+        self.vars = torch.nn.functional.normalize(self.vars, dim=1) # Assume normalization across each sub-quantization
+
+
+        self.weight_proj = nn.Linear(self.input_dim, groups * var_dim)
+        nn.init.xavier_uniform_(self.weight_proj.weight)
+        nn.init.zeros_(self.weight_proj.bias)
+
+        self.codebook_indices = None
+
+    def get_codebook_indices(self):
+        if self.codebook_indices is None:
+            from itertools import product
+
+            p = [range(self.num_vars)] * self.groups
+            inds = list(product(*p))
+            self.codebook_indices = torch.tensor(inds, dtype=torch.long, device=self.vars.device).flatten()
+
+            if not self.combine_groups:
+                self.codebook_indices = self.codebook_indices.view(self.num_vars ** self.groups, -1)
+                for b in range(1, self.groups):
+                    self.codebook_indices[:, b] += self.num_vars * b
+                self.codebook_indices = self.codebook_indices.flatten()
+        return self.codebook_indices
+
+    def sample_from_codebook(self, b, n):
+        indices = self.get_codebook_indices()
+        indices = indices.view(-1, self.groups)
+        cb_size = indices.size(0)
+        assert n < cb_size, f"sample size {n} is greater than size of codebook {cb_size}"
+        sample_idx = torch.randint(low=0, high=cb_size, size=(b * n,))
+        indices = indices[sample_idx]
+
+        z = self.vars.squeeze(0).index_select(0, indices.flatten()).view(b, n, -1)
+        return z
+
+    def forward(self, x, return_ids=False):
+        with torch.no_grad():
+            if not self.time_first:
+                x = x.transpose(1, 2)
+
+            bsz, tsz, fsz = x.shape
+            x = x.reshape(-1, fsz)
+            x = self.weight_proj(x)
+            # -> (bsz*tsz, groups*var_dim)
+
+            x = x.view(bsz*tsz*self.groups, -1)
+            # -> (bsz*tsz*groups, var_dim)
+
+            # We'll normalize across codebook entries
+            x = nn.functional.normalize(x, dim=1)
+
+            vars = self.vars
+            idx = []
+            for i in range(x.size(0)):
+                idx.append(torch.norm(vars - x[i], dim = 1).argmin())
+            q = vars[idx].view(bsz, tsz, -1)
+
+        return q
+
+    def set_num_updates(self, num_updates):
+        self.curr_temp = 0
