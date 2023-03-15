@@ -25,6 +25,7 @@ from nemo.collections.asr.parts.submodules.jasper import jasper_activations
 from nemo.core import NeuralModule
 from nemo.core.neural_types import EncodedRepresentation, LossType, NeuralType
 
+from time import process_time
 
 class GumbelVectorQuantizer(NeuralModule):
     def __init__(
@@ -228,6 +229,7 @@ class RandomQuantizer(NeuralModule):
         self.vars = torch.zeros((num_groups * num_vars, var_dim), requires_grad=False, device='cuda:0')
         nn.init.uniform_(self.vars)
         self.vars = torch.nn.functional.normalize(self.vars, dim=1) # Assume normalization across each sub-quantization
+        # -> num_vars * num_groups x var_dim
 
 
         self.weight_proj = nn.Linear(self.input_dim, groups * var_dim)
@@ -279,11 +281,22 @@ class RandomQuantizer(NeuralModule):
             x = nn.functional.normalize(x, dim=1)
 
             vars = self.vars
-            idx = []
-            for i in range(x.size(0)):
-                idx.append(torch.norm(vars - x[i], dim = 1).argmin())
-            q = vars[idx].view(bsz, tsz, -1)
 
+            ## naieve
+            #idx = []
+            #for i in range(x.size(0)):
+            #    idx.append(torch.norm(vars - x[i], dim = 1).argmin())
+            #q1 = vars[idx].reshape(bsz, tsz, -1)
+            # cdist
+            vars = vars.unsqueeze(0)
+            # -> 1 x num_groups*num_vars x var_dim (num_groups=1 if combine)
+            x = x.unsqueeze(0)
+            # -> 1 x bsz*tsz*groups x var_dim
+            print(vars.shape, x.shape)
+            d = torch.cdist(x, vars).squeeze(0)
+            # 1 x bsz*tsz*groups x num_groups*num_vars -> bsz*tsz*groups x num_groups*num_var
+            idx = d.argmin(dim=1)
+            q = vars.squeeze(0)[idx].reshape(bsz, tsz, -1)
         return q
 
     def set_num_updates(self, num_updates):
