@@ -50,7 +50,7 @@ from nemo.core.neural_types import (
 )
 from nemo.utils import logging
 
-__all__ = ['ConvASRDecoder', 'ConvASREncoder', 'ConvASRDecoderClassification']
+__all__ = ['ConvASRDecoder', 'ConvASREncoder', 'ConvASRDecoderClassification', 'MultiHeadConvASRDecoder']
 
 
 class ConvASREncoder(NeuralModule, Exportable, AccessMixin):
@@ -493,6 +493,71 @@ class ConvASRDecoder(NeuralModule, Exportable, adapter_mixins.AdapterModuleMixin
     def num_classes_with_blank(self):
         return self._num_classes
 
+
+class MultiHeadConvASRDecoder(NeuralModule, Exportable, adapter_mixins.AdapterModuleMixin):
+    # Decoder with multiple sub decoders. For multi head classification tasks
+    def __init__(self, feat_in, num_classes, num_dec, init_mode="xavier_uniform", vocabulary=None):
+        super().__init__()
+        self.num_dec = num_dec
+        self.decoders = nn.ModuleList(
+            ConvASRDecoder(feat_in=feat_in, num_classes=num_classes-1, init_mode=init_mode, vocabulary=vocabulary)
+            for _ in range(num_dec)
+        )
+
+    @property
+    def input_types(self):
+        return OrderedDict({"encoder_output": NeuralType(('B', 'D', 'T'), AcousticEncodedRepresentation())})
+
+    @property
+    def output_types(self):
+        return OrderedDict({"logprobs": NeuralType(('B', 'T', 'W', 'D'), LogprobsType())})
+
+    @typecheck()
+    def forward(self, encoder_output):
+        # Adapter module forward step
+        outputs = []
+        for idx, dec in enumerate(self.decoders):
+            out = dec(encoder_output=encoder_output)
+            outputs.append(out)
+        return torch.stack(outputs, dim=-2)
+
+    def input_example(self, max_batch=1, max_dim=256):
+        """
+        Generates input examples for tracing etc.
+        Returns:
+            A tuple of input examples.
+        """
+        input_example = torch.randn(max_batch, self._feat_in, max_dim).to(next(self.parameters()).device)
+        return tuple([input_example])
+
+    def _prepare_for_export(self, **kwargs):
+        m_count = 0
+        for m in self.modules():
+            if type(m).__name__ == "MaskedConv1d":
+                m.use_mask = False
+                m_count += 1
+        if m_count > 0:
+            logging.warning(f"Turned off {m_count} masked convolutions")
+        Exportable._prepare_for_export(self, **kwargs)
+
+    # Adapter method overrides
+    def add_adapter(self, name: str, cfg: DictConfig):
+        # Update the config with correct input dim
+        cfg = self._update_adapter_cfg_input_dim(cfg)
+        # Add the adapter
+        super().add_adapter(name=name, cfg=cfg)
+
+    def _update_adapter_cfg_input_dim(self, cfg: DictConfig):
+        cfg = adapter_utils.update_adapter_cfg_input_dim(self, cfg, module_dim=self._feat_in)
+        return cfg
+
+    @property
+    def vocabulary(self):
+        return self.__vocabulary
+
+    @property
+    def num_classes_with_blank(self):
+        return self._num_classes
 
 class ConvASRDecoderReconstruction(NeuralModule, Exportable):
     """ASR Decoder for reconstructing masked regions of spectrogram

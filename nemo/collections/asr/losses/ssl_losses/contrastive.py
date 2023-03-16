@@ -522,7 +522,3 @@ class FixedCodebookContrastiveLoss(Loss):
         if neg_is_pos.any():
             logits[1:][neg_is_pos] = float("-inf")
         return logits
-
-    def set_num_updates(self, num_updates):
-        if self.quantized_targets:
-            self.quantizer.set_num_updates(num_updates)

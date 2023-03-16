@@ -33,6 +33,7 @@ from nemo.collections.asr.modules.conv_asr import (
     ECAPAEncoder,
     ParallelConvASREncoder,
     SpeakerDecoder,
+    MultiHeadConvASRDecoder
 )
 from nemo.collections.asr.modules.graph_decoder import ViterbiDecoderWithGraph
 from nemo.collections.asr.modules.lstm_decoder import LSTMDecoder

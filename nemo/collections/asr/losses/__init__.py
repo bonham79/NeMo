@@ -17,6 +17,7 @@ from nemo.collections.asr.losses.audio_losses import SDRLoss
 from nemo.collections.asr.losses.ctc import CTCLoss
 from nemo.collections.asr.losses.lattice_losses import LatticeLoss
 from nemo.collections.asr.losses.ssl_losses.contrastive import ContrastiveLoss, FixedCodebookContrastiveLoss
+from nemo.collections.asr.losses.ssl_losses.predictive import FixedCodebookPredictiveLoss
 from nemo.collections.asr.losses.ssl_losses.ctc import CTCLossForSSL
 from nemo.collections.asr.losses.ssl_losses.mlm import MLMLoss
 from nemo.collections.asr.losses.ssl_losses.rnnt import RNNTLossForSSL

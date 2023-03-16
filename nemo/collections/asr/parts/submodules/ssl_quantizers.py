@@ -25,7 +25,6 @@ from nemo.collections.asr.parts.submodules.jasper import jasper_activations
 from nemo.core import NeuralModule
 from nemo.core.neural_types import EncodedRepresentation, LossType, NeuralType
 
-from time import process_time
 
 class GumbelVectorQuantizer(NeuralModule):
     def __init__(
@@ -211,10 +210,11 @@ class RandomQuantizer(NeuralModule):
         combine_groups,
         vq_dim,
         time_first,
+        seed,
     ):
 
         super().__init__()
-
+        
         self.groups = groups
         self.combine_groups = combine_groups
         self.input_dim = dim
@@ -226,15 +226,17 @@ class RandomQuantizer(NeuralModule):
         var_dim = vq_dim // groups
         num_groups = groups if not combine_groups else 1
 
-        self.vars = torch.zeros((num_groups * num_vars, var_dim), requires_grad=False, device='cuda:0')
-        nn.init.uniform_(self.vars)
-        self.vars = torch.nn.functional.normalize(self.vars, dim=1) # Assume normalization across each sub-quantization
-        # -> num_vars * num_groups x var_dim
-
+        # For reproducing inits
+        torch.manual_seed(seed)
 
         self.weight_proj = nn.Linear(self.input_dim, groups * var_dim)
         nn.init.xavier_uniform_(self.weight_proj.weight)
         nn.init.zeros_(self.weight_proj.bias)
+
+        self.vars = torch.zeros((num_groups * num_vars, var_dim), requires_grad=False, device='cuda:0') #CHANGE THIS
+        nn.init.uniform_(self.vars)
+        self.vars = torch.nn.functional.normalize(self.vars, dim=1) # Assume normalization across each sub-quantization
+        # -> num_vars * num_groups x var_dim
 
         self.codebook_indices = None
 
@@ -253,17 +255,6 @@ class RandomQuantizer(NeuralModule):
                 self.codebook_indices = self.codebook_indices.flatten()
         return self.codebook_indices
 
-    def sample_from_codebook(self, b, n):
-        indices = self.get_codebook_indices()
-        indices = indices.view(-1, self.groups)
-        cb_size = indices.size(0)
-        assert n < cb_size, f"sample size {n} is greater than size of codebook {cb_size}"
-        sample_idx = torch.randint(low=0, high=cb_size, size=(b * n,))
-        indices = indices[sample_idx]
-
-        z = self.vars.squeeze(0).index_select(0, indices.flatten()).view(b, n, -1)
-        return z
-
     def forward(self, x, return_ids=False):
         with torch.no_grad():
             if not self.time_first:
@@ -280,24 +271,23 @@ class RandomQuantizer(NeuralModule):
             # We'll normalize across codebook entries
             x = nn.functional.normalize(x, dim=1)
 
-            vars = self.vars
-
-            ## naieve
-            #idx = []
-            #for i in range(x.size(0)):
-            #    idx.append(torch.norm(vars - x[i], dim = 1).argmin())
-            #q1 = vars[idx].reshape(bsz, tsz, -1)
-            # cdist
-            vars = vars.unsqueeze(0)
+            # cdist needs 3d
+            vars = self.vars.unsqueeze(0)
             # -> 1 x num_groups*num_vars x var_dim (num_groups=1 if combine)
             x = x.unsqueeze(0)
             # -> 1 x bsz*tsz*groups x var_dim
-            print(vars.shape, x.shape)
+
+            # get all distances
             d = torch.cdist(x, vars).squeeze(0)
             # 1 x bsz*tsz*groups x num_groups*num_vars -> bsz*tsz*groups x num_groups*num_var
-            idx = d.argmin(dim=1)
-            q = vars.squeeze(0)[idx].reshape(bsz, tsz, -1)
-        return q
 
-    def set_num_updates(self, num_updates):
-        self.curr_temp = 0
+            # Find smallest distances
+            idx = d.argmin(dim=1)
+            
+            # Assign clusters
+            q = vars.squeeze(0)[idx].reshape(bsz, tsz, -1)
+
+            if return_ids:
+                return q, idx.reshape(bsz, tsz, self.groups)
+            else:
+                return q
